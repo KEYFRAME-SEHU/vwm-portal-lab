@@ -67,9 +67,9 @@ const PORTALS: PortalDefinition[] = [
     color: '#ffcb5c',
   },
   {
-    name: 'VIVERSE',
-    shortName: 'VIVERSE',
-    url: 'https://www.viverse.com/HuoQZQX',
+    name: 'Teleportal',
+    shortName: 'TELEPORTAL',
+    url: 'https://www.virtualworlds.museum/teleportal',
     color: '#ff70c9',
   },
   {

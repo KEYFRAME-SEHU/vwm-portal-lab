@@ -8,7 +8,7 @@ A minimal IWSDK/WebXR interoperability test for the Virtual Worlds Museum™.
 2. Horizon Worlds — https://horizon.meta.com/world/478207822044529/?locale=en_US
 3. Hyperfy — https://hyperfy.io/virtualworldsmuseum/~luwj
 4. RP1 — https://enter.rp1.com/?start_cid=104&lat=2.009970127790&lon=2.009992411959&rad=6371000
-5. VIVERSE — https://www.viverse.com/HuoQZQX
+5. Teleportal — https://www.virtualworlds.museum/teleportal
 6. Frame — https://framevr.io/virtualworldsmuseum
 
 ## What this test does
