@@ -15,7 +15,8 @@ A minimal IWSDK/WebXR interoperability test for the Virtual Worlds Museum™.
 
 - Runs as a WebXR world on Meta Quest through the Quest browser.
 - Uses IWSDK 0.5.x manifest-first project configuration and locomotion.
-- Generates six portal structures entirely in code, with no external 3D assets.
+- Generates six oval portal structures entirely in code, with no external 3D assets: each portal has a glowing sci-fi ring, an animated plasma shader interior, and a museum placard.
+- The room is a circular Star Trek style holodeck: yellow grid on black walls, floor, and ceiling, with a central dais carrying the Virtual Worlds Museum emblem.
 - Detects when the viewer's head enters a portal opening.
 - Exits the current WebXR session and navigates the same browser tab to the selected destination.
 
