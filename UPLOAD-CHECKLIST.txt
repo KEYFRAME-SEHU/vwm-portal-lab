@@ -1,0 +1,34 @@
+VWM PORTAL LAB 01 — GITHUB UPLOAD CHECKLIST
+
+Repository name must be exactly: vwm-portal-lab
+
+After uploading, the TOP LEVEL of your GitHub repo should show:
+
+.github/
+src/
+.gitignore
+index.html
+iwsdk.config.json
+package.json
+README.md
+tsconfig.json
+vite.config.ts
+UPLOAD-CHECKLIST.txt
+
+Inside .github/workflows/ there must be:
+deploy.yml
+
+Inside public/scenes/ there must be:
+main.iwsdk.scene.json
+
+Inside src/ there must be:
+index.ts
+
+Then go to:
+Settings > Pages > Build and deployment > Source > GitHub Actions
+
+Then check:
+Actions > Deploy VWM Portal Lab to GitHub Pages
+
+Quest URL after successful deployment:
+https://KEYFRAME-SEHU.github.io/vwm-portal-lab/

@@ -1,0 +1,25 @@
+{
+  "name": "vwm-portal-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "iwsdk dev up --headed --open",
+    "dev:runtime": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@iwsdk/core": "^0.5.3",
+    "three": "npm:super-three@0.181.0"
+  },
+  "devDependencies": {
+    "@iwsdk/cli": "^0.5.3",
+    "@iwsdk/vite-plugin-dev": "^0.5.3",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.4"
+  },
+  "overrides": {
+    "three": "npm:super-three@0.181.0"
+  }
+}
