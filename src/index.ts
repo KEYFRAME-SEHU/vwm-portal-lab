@@ -128,8 +128,13 @@ function makeHolodeckGridTexture(size = 1024, cells = 16): CanvasTexture {
 }
 
 function makeWallGridTexture(): CanvasTexture {
+  // One grid cell per tile, repeated around and up the cylinder wall.
+  // The wall is 2 * pi * 7 m around (~43.98 m) and 4.9 m tall (WALL_HEIGHT in
+  // main). 72 columns x 8 rows gives cells of 0.611 m x 0.613 m: square, the
+  // way the holodeck grid should read. Drawing only the left and top edge of
+  // the tile keeps every seam line the same weight as the interior lines.
   const canvas = document.createElement('canvas');
-  canvas.width = 1024;
+  canvas.width = 256;
   canvas.height = 256;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('2D canvas is unavailable');
@@ -137,27 +142,20 @@ function makeWallGridTexture(): CanvasTexture {
   ctx.fillStyle = '#060606';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  ctx.strokeStyle = 'rgba(245,197,24,0.5)';
-  ctx.lineWidth = 2;
-  for (let x = 0; x <= canvas.width; x += 64) {
-    ctx.beginPath();
-    ctx.moveTo(x + 0.5, 0);
-    ctx.lineTo(x + 0.5, canvas.height);
-    ctx.stroke();
-  }
   ctx.strokeStyle = 'rgba(245,197,24,0.9)';
-  ctx.lineWidth = 4;
-  for (const y of [2, 128, 254]) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(canvas.width, y);
-    ctx.stroke();
-  }
+  ctx.lineWidth = 7;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(canvas.width, 0);
+  ctx.moveTo(0, 0);
+  ctx.lineTo(0, canvas.height);
+  ctx.stroke();
 
   const texture = new CanvasTexture(canvas);
   texture.colorSpace = SRGBColorSpace;
   texture.wrapS = RepeatWrapping;
-  texture.repeat.set(10, 1);
+  texture.wrapT = RepeatWrapping;
+  texture.repeat.set(72, 8);
   texture.anisotropy = 4;
   return texture;
 }
@@ -504,20 +502,18 @@ class PortalTraversalSystem extends createSystem({}, {}) {
     }
   }
 
-  private async jumpTo(definition: PortalDefinition) {
+  private jumpTo(definition: PortalDefinition) {
     const status = document.getElementById('status');
     if (status) status.textContent = `Opening ${definition.name}…`;
     document.body.classList.add('portal-jump');
 
-    try {
-      await this.world.exitXR();
-    } catch {
-      // It is safe to continue if there is no active XR session.
-    }
-
+    // Do NOT exit the XR session here. Navigating away while the session is
+    // still active lets the browser fire `sessiongranted` on the destination
+    // page, which can then re-enter VR without another click. Exiting first
+    // would force every visitor through the Enter VR button again on arrival.
     window.setTimeout(() => {
       window.location.assign(definition.url);
-    }, 260);
+    }, 320);
   }
 }
 
@@ -536,12 +532,12 @@ async function main() {
   const key = new DirectionalLight(0xffffff, 1.6);
   key.position.set(3, 8, 2);
   const warmth = new PointLight(0xffd75e, 12, 22);
-  warmth.position.set(0, 3.0, 0);
+  warmth.position.set(0, 4.0, 0);
   world.scene.add(ambient, key, warmth);
 
   // --- Circular holodeck room -------------------------------------------
   const ROOM_RADIUS = 7;
-  const WALL_HEIGHT = 3.4;
+  const WALL_HEIGHT = 4.9;
 
   const floorGrid = makeHolodeckGridTexture(1024, 16);
   const floor = new Mesh(
@@ -615,7 +611,7 @@ async function main() {
 
   // --- Branding -----------------------------------------------------------
   const title = makeTitleSprite();
-  title.position.set(0, 2.62, 0);
+  title.position.set(0, 4.3, 0);
   world.createTransformEntity(title);
 
   // --- Portals ------------------------------------------------------------
@@ -632,15 +628,29 @@ async function main() {
   const status = document.getElementById('status');
 
   enterButton?.addEventListener('click', async () => {
+    await enterXR();
+  });
+
+  // Seamless portal returns: when a visitor arrives here through a portal
+  // jump from a page that had an active XR session, the browser fires
+  // `sessiongranted` on navigator.xr. Inside that handler we may enter VR
+  // without requiring another click, so portal-to-portal travel stays
+  // inside the headset.
+  const xr = (navigator as Navigator & { xr?: EventTarget }).xr;
+  xr?.addEventListener('sessiongranted', () => {
+    void enterXR(true);
+  });
+
+  async function enterXR(fromPortal = false) {
     try {
-      if (status) status.textContent = 'Starting immersive mode…';
+      if (status) status.textContent = fromPortal ? 'Portal received. Entering VR…' : 'Starting immersive mode…';
       await world.launchXR();
       if (status) status.textContent = 'In VR. Walk into any glowing portal.';
     } catch (error) {
       console.error(error);
       if (status) status.textContent = 'Could not enter VR. See browser console for details.';
     }
-  });
+  }
 }
 
 void main();
