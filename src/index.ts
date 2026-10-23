@@ -17,6 +17,7 @@ import {
   PlaneGeometry,
   PointLight,
   RepeatWrapping,
+  SphereGeometry,
   ShaderMaterial,
   Sprite,
   SpriteMaterial,
@@ -473,19 +474,28 @@ class PortalEffectsSystem extends createSystem({}, {}) {
   }
 }
 
+// Shared traversal gate. PortalTraversalSystem locks it while a jump or swap
+// is in flight; WorldSwapSystem releases it when an in-session swap lands.
+// `armed` requires the visitor to step out of a portal before it can trigger
+// again, so arriving inside the return portal's space never double-fires.
+const traversalGate = { navigating: false, warmup: 1.5, armed: true };
+
+// Experiment B control channel: PortalTraversalSystem posts a swap request
+// here, WorldSwapSystem consumes it.
+const swapControl: { pendingLevel: 'hub' | 'test-room' | null } = { pendingLevel: null };
+
 class PortalTraversalSystem extends createSystem({}, {}) {
   private headWorld = new Vector3();
   private headLocal = new Vector3();
-  private navigating = false;
-  private warmup = 1.5;
 
   update(delta: number) {
-    if (this.navigating) return;
-    this.warmup -= delta;
-    if (this.warmup > 0) return;
+    if (traversalGate.navigating) return;
+    traversalGate.warmup -= delta;
+    if (traversalGate.warmup > 0) return;
 
     this.camera.getWorldPosition(this.headWorld);
 
+    let insideAny = false;
     for (const target of portalTargets) {
       this.headLocal.copy(this.headWorld);
       target.group.worldToLocal(this.headLocal);
@@ -495,15 +505,30 @@ class PortalTraversalSystem extends createSystem({}, {}) {
       const insidePortal = nx * nx + ny * ny < 1 && Math.abs(this.headLocal.z) < 0.42;
 
       if (insidePortal) {
-        this.navigating = true;
-        void this.jumpTo(target.definition);
-        return;
+        insideAny = true;
+        if (traversalGate.armed) {
+          traversalGate.navigating = true;
+          traversalGate.armed = false;
+          void this.jumpTo(target.definition);
+          return;
+        }
       }
     }
+    if (!insideAny) traversalGate.armed = true;
   }
 
   private jumpTo(definition: PortalDefinition) {
     const status = document.getElementById('status');
+
+    // Experiment B: swap portals never navigate. The world is exchanged
+    // inside the live XR session by WorldSwapSystem via world.loadLevel().
+    if (definition.url.startsWith('swap:')) {
+      const level = definition.url.slice('swap:'.length) as 'hub' | 'test-room';
+      if (status) status.textContent = `Swapping to ${definition.name} without leaving VR…`;
+      swapControl.pendingLevel = level;
+      return;
+    }
+
     if (status) status.textContent = `Opening ${definition.name}…`;
     document.body.classList.add('portal-jump');
 
@@ -517,25 +542,54 @@ class PortalTraversalSystem extends createSystem({}, {}) {
   }
 }
 
-async function main() {
-  const container = document.getElementById('scene-container');
-  if (!container) throw new Error('Missing #scene-container');
+// ---------------------------------------------------------------------------
+// Experiment B: in-session world swapping (no page navigation)
+// ---------------------------------------------------------------------------
 
-  const world = await World.create(container, projectOptions);
+const SWAP_DEF: PortalDefinition = {
+  name: 'Test Room',
+  shortName: 'TEST ROOM · EXP B',
+  url: 'swap:test-room',
+  color: '#eaf6ff',
+};
 
-  // Comfortable desktop preview. In XR, the headset owns the tracked camera pose.
-  world.camera.position.set(0, 1.65, 0.4);
-  world.camera.lookAt(0, 1.4, -3);
-  world.scene.background = new Color('#050506');
+const RETURN_DEF: PortalDefinition = {
+  name: 'Portal Lab Hub',
+  shortName: 'RETURN TO HUB',
+  url: 'swap:hub',
+  color: '#ffd75e',
+};
 
-  const ambient = new AmbientLight(0xffffff, 0.85);
-  const key = new DirectionalLight(0xffffff, 1.6);
-  key.position.set(3, 8, 2);
-  const warmth = new PointLight(0xffd75e, 12, 22);
-  warmth.position.set(0, 4.0, 0);
-  world.scene.add(ambient, key, warmth);
+let activeWorld: World | null = null;
 
-  // --- Circular holodeck room -------------------------------------------
+const expStats = {
+  firstSession: null as XRSession | null,
+  sessionEnds: 0,
+  sessionReplaced: 0,
+  swaps: 0,
+};
+
+const fadeState = { mesh: null as Mesh | null, opacity: 0 };
+
+function reportStats(note: string) {
+  console.log(
+    `[ExperimentB] ${note} · swaps=${expStats.swaps} sessionEnds=${expStats.sessionEnds} sessionReplaced=${expStats.sessionReplaced}`,
+  );
+  const status = document.getElementById('status');
+  if (status) {
+    status.textContent = `Experiment B: ${note}. Swaps: ${expStats.swaps} · VR session ends: ${expStats.sessionEnds}`;
+  }
+}
+
+function pinSession(session: XRSession) {
+  expStats.firstSession = session;
+  session.addEventListener('end', () => {
+    expStats.sessionEnds += 1;
+    reportStats('session ended');
+  });
+}
+
+function buildHubContent(world: World) {
   const ROOM_RADIUS = 7;
   const WALL_HEIGHT = 4.9;
 
@@ -554,7 +608,6 @@ async function main() {
     type: EnvironmentType.STATIC,
   });
 
-  // Dark base ring under the floor for edge thickness.
   const base = new Mesh(
     new CylinderGeometry(ROOM_RADIUS + 0.06, ROOM_RADIUS + 0.06, 0.14, 72),
     new MeshStandardMaterial({ color: new Color('#0b0b0e'), roughness: 0.9 }),
@@ -585,7 +638,6 @@ async function main() {
   ceiling.position.y = WALL_HEIGHT;
   world.createTransformEntity(ceiling);
 
-  // --- Center dais with the VWM emblem -----------------------------------
   const dais = new Mesh(
     new CylinderGeometry(1.25, 1.35, 0.16, 48),
     new MeshStandardMaterial({
@@ -609,20 +661,236 @@ async function main() {
   emblem.position.y = 0.165;
   world.createTransformEntity(emblem);
 
-  // --- Branding -----------------------------------------------------------
   const title = makeTitleSprite();
   title.position.set(0, 4.3, 0);
   world.createTransformEntity(title);
 
-  // --- Portals ------------------------------------------------------------
   PORTALS.forEach((definition, index) => {
     const group = createPortal(definition, index);
     world.createTransformEntity(group);
     portalTargets.push({ definition, group });
   });
 
+  // Experiment B swap portal: stands inside the room, facing the spawn.
+  const swapGroup = createPortal(SWAP_DEF, 0);
+  swapGroup.position.set(0, 1.5, -2.6);
+  swapGroup.lookAt(0, 1.5, 0);
+  swapGroup.updateMatrixWorld(true);
+  world.createTransformEntity(swapGroup);
+  portalTargets.push({ definition: SWAP_DEF, group: swapGroup });
+}
+
+function makeTestRoomSign(): Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 512;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('2D canvas is unavailable');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#7deeff';
+  ctx.font = '700 120px Arial';
+  ctx.fillText('TEST ROOM', 512, 180);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 56px Arial';
+  ctx.fillText('Same session. New world.', 512, 290);
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.font = '46px Arial';
+  ctx.fillText(`Swaps: ${expStats.swaps} · Session ends: ${expStats.sessionEnds}`, 512, 390);
+
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  const sprite = new Sprite(
+    new SpriteMaterial({ map: texture, transparent: true, toneMapped: false }),
+  );
+  sprite.scale.set(4.4, 2.2, 1);
+  return sprite;
+}
+
+function buildTestRoomContent(world: World) {
+  const ROOM_RADIUS = 5;
+  const WALL_HEIGHT = 3.4;
+  const tint = new Color('#59d8f2');
+
+  const floor = new Mesh(
+    new CircleGeometry(ROOM_RADIUS, 56),
+    new MeshStandardMaterial({
+      map: makeHolodeckGridTexture(1024, 12),
+      color: tint,
+      roughness: 0.85,
+      metalness: 0.05,
+    }),
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = 0.001;
+  world.createTransformEntity(floor).addComponent(LocomotionEnvironment, {
+    type: EnvironmentType.STATIC,
+  });
+
+  const walls = new Mesh(
+    new CylinderGeometry(ROOM_RADIUS, ROOM_RADIUS, WALL_HEIGHT, 56, 1, true),
+    new MeshBasicMaterial({
+      map: makeWallGridTexture(),
+      color: tint,
+      side: BackSide,
+      toneMapped: false,
+    }),
+  );
+  walls.position.y = WALL_HEIGHT / 2;
+  world.createTransformEntity(walls);
+
+  const ceiling = new Mesh(
+    new CircleGeometry(ROOM_RADIUS, 56),
+    new MeshBasicMaterial({ color: new Color('#0a1418'), toneMapped: false }),
+  );
+  ceiling.rotation.x = Math.PI / 2;
+  ceiling.position.y = WALL_HEIGHT;
+  world.createTransformEntity(ceiling);
+
+  const dais = new Mesh(
+    new CylinderGeometry(0.8, 0.9, 0.16, 40),
+    new MeshStandardMaterial({
+      color: new Color('#0d2a33'),
+      metalness: 0.45,
+      roughness: 0.4,
+      emissive: tint,
+      emissiveIntensity: 0.25,
+    }),
+  );
+  dais.position.y = 0.08;
+  world.createTransformEntity(dais);
+
+  const sign = makeTestRoomSign();
+  sign.position.set(0, 2.2, -3.6);
+  world.createTransformEntity(sign);
+
+  const returnGroup = createPortal(RETURN_DEF, 0);
+  returnGroup.position.set(0, 1.5, 2.9);
+  returnGroup.lookAt(0, 1.5, 0);
+  returnGroup.updateMatrixWorld(true);
+  world.createTransformEntity(returnGroup);
+  portalTargets.push({ definition: RETURN_DEF, group: returnGroup });
+}
+
+class WorldSwapSystem extends createSystem({}, {}) {
+  private phase: 'idle' | 'out' | 'swapping' | 'in' = 'idle';
+  private target: 'hub' | 'test-room' = 'hub';
+  private camPos = new Vector3();
+
+  update(delta: number) {
+    // Session instrumentation: pin the first XR session object and count
+    // ends. If swaps work, the session object never changes and never ends.
+    const session = activeWorld?.session;
+    if (session && session !== expStats.firstSession) {
+      if (expStats.firstSession) expStats.sessionReplaced += 1;
+      pinSession(session);
+      reportStats('session pinned');
+    }
+
+    if (this.phase === 'idle' && swapControl.pendingLevel) {
+      this.target = swapControl.pendingLevel;
+      swapControl.pendingLevel = null;
+      this.phase = 'out';
+    }
+    if (this.phase === 'out') {
+      fadeState.opacity = Math.min(1, fadeState.opacity + delta / 0.3);
+      if (fadeState.opacity >= 1) {
+        this.phase = 'swapping';
+        void this.performSwap();
+      }
+    } else if (this.phase === 'in') {
+      fadeState.opacity = Math.max(0, fadeState.opacity - delta / 0.3);
+      if (fadeState.opacity <= 0) this.phase = 'idle';
+    }
+
+    if (fadeState.mesh) {
+      this.camera.getWorldPosition(this.camPos);
+      fadeState.mesh.position.copy(this.camPos);
+      (fadeState.mesh.material as MeshBasicMaterial).opacity = fadeState.opacity;
+      fadeState.mesh.visible = fadeState.opacity > 0.001;
+    }
+  }
+
+  private async performSwap() {
+    const world = activeWorld;
+    if (!world) {
+      this.phase = 'in';
+      return;
+    }
+    try {
+      // The main scene document is empty by design (all content is built in
+      // code), so loadLevel performs the level unload: every non-persistent
+      // entity from the current room is cleared while the XR session, the
+      // player rig and this system keep running.
+      await world.loadLevel('scenes/main.iwsdk.scene.json');
+      portalTargets.length = 0;
+      portalFx.length = 0;
+      expStats.swaps += 1;
+      if (this.target === 'test-room') {
+        buildTestRoomContent(world);
+        window.history.pushState(null, '', '?world=test-room');
+      } else {
+        buildHubContent(world);
+        window.history.pushState(null, '', '?world=hub');
+      }
+      reportStats(`swapped to ${this.target}`);
+    } catch (error) {
+      console.error('[ExperimentB] swap failed', error);
+    }
+    traversalGate.navigating = false;
+    traversalGate.warmup = 1.0;
+    this.phase = 'in';
+  }
+}
+
+async function main() {
+  const container = document.getElementById('scene-container');
+  if (!container) throw new Error('Missing #scene-container');
+
+  const world = await World.create(container, projectOptions);
+
+  // Comfortable desktop preview. In XR, the headset owns the tracked camera pose.
+  world.camera.position.set(0, 1.65, 0.4);
+  world.camera.lookAt(0, 1.4, -3);
+  world.scene.background = new Color('#050506');
+
+  const ambient = new AmbientLight(0xffffff, 0.85);
+  const key = new DirectionalLight(0xffffff, 1.6);
+  key.position.set(3, 8, 2);
+  const warmth = new PointLight(0xffd75e, 12, 22);
+  warmth.position.set(0, 4.0, 0);
+  world.scene.add(ambient, key, warmth);
+
+  activeWorld = world;
+
+  // In-session fade curtain (Experiment B): a black sphere that follows the
+  // visitor's head. Persistent, so it survives level swaps.
+  fadeState.mesh = new Mesh(
+    new SphereGeometry(0.45, 24, 16),
+    new MeshBasicMaterial({
+      color: new Color('#000000'),
+      side: BackSide,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+    }),
+  );
+  fadeState.mesh.renderOrder = 999;
+  fadeState.mesh.frustumCulled = false;
+  fadeState.mesh.visible = false;
+  world.createTransformEntity(fadeState.mesh, { persistent: true });
+
+  // --- First level (hub by default, test room if the URL asks for it) ------
+  const startLevel =
+    new URLSearchParams(window.location.search).get('world') === 'test-room'
+      ? 'test-room'
+      : 'hub';
+  if (startLevel === 'test-room') buildTestRoomContent(world);
+  else buildHubContent(world);
+
   world.registerSystem(PortalEffectsSystem, { priority: 4 });
   world.registerSystem(PortalTraversalSystem, { priority: 5 });
+  world.registerSystem(WorldSwapSystem, { priority: 6 });
 
   const enterButton = document.getElementById('enter-xr') as HTMLButtonElement | null;
   const status = document.getElementById('status');
