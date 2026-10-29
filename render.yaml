@@ -1,0 +1,20 @@
+# Render Blueprint: builds the site and serves dist/ as a static site.
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: vwm-portal-lab
+    runtime: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      # Vite 7 needs Node 20.19+; matches the GitHub Pages workflow.
+      - key: NODE_VERSION
+        value: 20.19.0
+      # Render serves from the domain root, not /vwm-portal-lab/ (see vite.config.ts).
+      - key: BASE_PATH
+        value: /
+    headers:
+      # Vite fingerprints everything under /assets/, so it can be cached forever.
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
