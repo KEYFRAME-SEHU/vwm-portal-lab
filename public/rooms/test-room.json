@@ -1,0 +1,40 @@
+{
+  "id": "test-room",
+  "radius": 5,
+  "wallHeight": 3.4,
+  "segments": 56,
+  "tint": "#59d8f2",
+  "floor": { "gridCells": 12 },
+  "ceiling": { "grid": false, "color": "#0a1418" },
+  "dais": {
+    "radiusTop": 0.8,
+    "radiusBottom": 0.9,
+    "segments": 40,
+    "color": "#0d2a33",
+    "glow": 0.25
+  },
+  "sign": {
+    "style": "panel",
+    "title": "TEST ROOM",
+    "subtitle": "Same session. New world.",
+    "caption": "Swaps: {swaps} · Session ends: {sessionEnds}",
+    "color": "#7deeff",
+    "position": [0, 2.2, -3.6]
+  },
+  "portals": [
+    {
+      "name": "Portal Lab Hub",
+      "shortName": "RETURN TO HUB",
+      "url": "swap:hub",
+      "color": "#ffd75e",
+      "position": [0, 1.5, 2.9]
+    },
+    {
+      "name": "Virtual Worlds Museum",
+      "shortName": "VWM",
+      "url": "swap:vwm",
+      "color": "#c79bff",
+      "position": [2.9, 1.5, 0]
+    }
+  ]
+}

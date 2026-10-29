@@ -1,0 +1,31 @@
+{
+  "id": "vwm",
+  "model": {
+    "url": "rooms/vwm/Polished VWM 3d model compressed.glb",
+    "position": [20.45, 2.16, -30.0]
+  },
+  "sign": {
+    "style": "panel",
+    "title": "VWM",
+    "subtitle": "Virtual Worlds Museum",
+    "caption": "Swaps: {swaps} · Session ends: {sessionEnds}",
+    "color": "#d9c2ff",
+    "position": [0, 2.8, -3.6]
+  },
+  "portals": [
+    {
+      "name": "Portal Lab Hub",
+      "shortName": "RETURN TO HUB",
+      "url": "swap:hub",
+      "color": "#ffd75e",
+      "position": [0, 1.5, 2.9]
+    },
+    {
+      "name": "Test Room",
+      "shortName": "TEST ROOM",
+      "url": "swap:test-room",
+      "color": "#7deeff",
+      "position": [-2.9, 1.5, 0]
+    }
+  ]
+}

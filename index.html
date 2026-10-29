@@ -14,7 +14,8 @@
         background: #090d18;
         font-family: Arial, Helvetica, sans-serif;
       }
-      #scene-container { position: fixed; inset: 0; }
+      #scene-container { position: fixed; inset: 0; cursor: grab; }
+      #scene-container.dragging { cursor: grabbing; }
       #hud {
         position: fixed;
         z-index: 10;
@@ -31,7 +32,7 @@
       }
       #hud h1 { margin: 0 0 6px; font-size: 18px; }
       #hud p { margin: 6px 0; font-size: 13px; color: #d6d9e0; }
-      #enter-xr {
+      #enter-xr, #mp-controls button {
         margin-top: 10px;
         border: 0;
         border-radius: 10px;
@@ -39,7 +40,9 @@
         font-weight: 700;
         cursor: pointer;
       }
-      #status { font-size: 12px; opacity: 0.8; }
+      #mp-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+      #mp-controls button { padding: 8px 12px; font-size: 12px; }
+      #status, #mp-status { font-size: 12px; opacity: 0.8; }
       #fade {
         pointer-events: none;
         position: fixed;
@@ -60,8 +63,15 @@
     <div id="hud">
       <h1>Virtual Worlds Museum — Portal Lab 01</h1>
       <p>Six glowing oval portals, one circular holodeck. Enter VR, use the left thumbstick to move and the right thumbstick to turn. Walk directly into a portal's plasma to open its destination.</p>
+      <p>On desktop: W/S or ↑/↓ to move, A/D to strafe, ←/→ or drag the mouse to look, Space to jump. In VR, X toggles your mic and Y your camera.</p>
       <button id="enter-xr">ENTER VR</button>
       <p id="status">Ready.</p>
+      <div id="mp-controls">
+        <button id="mp-join">JOIN VOICE</button>
+        <button id="mp-mic" hidden>MUTE MIC</button>
+        <button id="mp-camera">CAMERA ON</button>
+      </div>
+      <p id="mp-status">Connecting…</p>
     </div>
     <div id="fade"></div>
     <script type="module" src="/src/index.ts"></script>

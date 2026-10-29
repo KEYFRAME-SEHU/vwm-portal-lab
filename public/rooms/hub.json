@@ -1,0 +1,63 @@
+{
+  "id": "hub",
+  "radius": 7,
+  "wallHeight": 4.9,
+  "segments": 72,
+  "floor": { "gridCells": 16 },
+  "ceiling": { "grid": true, "color": "#3d3d3d" },
+  "base": { "color": "#0b0b0e" },
+  "dais": {
+    "radiusTop": 1.25,
+    "radiusBottom": 1.35,
+    "segments": 48,
+    "color": "#15171d",
+    "emblemRadius": 1.14
+  },
+  "sign": {
+    "style": "banner",
+    "title": "VIRTUAL WORLDS MUSEUM",
+    "subtitle": "PORTAL LAB 01 — SIX INTEROPERABLE WORLDS",
+    "caption": "virtualworlds.museum",
+    "color": "#f5c518",
+    "position": [0, 4.3, 0]
+  },
+  "portalRing": { "radius": 4.6, "height": 1.5 },
+  "portals": [
+    {
+      "name": "Arrival Space",
+      "shortName": "ARRIVAL SPACE",
+      "url": "https://live.arrival.space/virtualworldsmuseum",
+      "color": "#55d6ff"
+    },
+    {
+      "name": "Horizon Worlds",
+      "shortName": "HORIZON WORLDS",
+      "url": "https://horizon.meta.com/world/478207822044529/?locale=en_US",
+      "color": "#9b8cff"
+    },
+    {
+      "name": "Hyperfy",
+      "shortName": "HYPERFY",
+      "url": "https://hyperfy.io/virtualworldsmuseum/~luwj",
+      "color": "#55ffad"
+    },
+    {
+      "name": "RP1",
+      "shortName": "RP1",
+      "url": "https://enter.rp1.com/?start_cid=104&lat=2.009970127790&lon=2.009992411959&rad=6371000",
+      "color": "#ffcb5c"
+    },
+    {
+      "name": "Teleportal",
+      "shortName": "TELEPORTAL",
+      "url": "https://www.virtualworlds.museum/teleportal",
+      "color": "#ff70c9"
+    },
+    {
+      "name": "Frame",
+      "shortName": "FRAME",
+      "url": "https://framevr.io/virtualworldsmuseum",
+      "color": "#ff755f"
+    }
+  ]
+}
