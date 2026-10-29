@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@iwsdk/core": "^0.5.3",
+    "peerjs": "^1.5.5",
     "three": "npm:super-three@0.181.0"
   },
   "devDependencies": {

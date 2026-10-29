@@ -1,8 +1,10 @@
 import {
   AdditiveBlending,
   AmbientLight,
+  AssetManager,
   BackSide,
   BoxGeometry,
+  BufferGeometry,
   CanvasTexture,
   CircleGeometry,
   Color,
@@ -26,15 +28,30 @@ import {
   Vector3,
   World,
   createSystem,
+  InputActions,
+  InputComponent,
   LocomotionEnvironment,
+  LocomotionSystem,
+  type Entity,
+  Quaternion,
+  SlideSystem,
+  XRHandVisualAdapter,
 } from '@iwsdk/core';
 import projectOptions from 'virtual:iwsdk-project';
+import { multiplayer, type HandState, type MultiplayerStatus } from './multiplayer';
+import { RemoteAvatars } from './remote-avatars';
+
+type Vec3 = [number, number, number];
 
 type PortalDefinition = {
   name: string;
   shortName: string;
+  // External URL, or `swap:<room id>` for an in-session room swap.
   url: string;
   color: string;
+  // Placed portals stand here facing the room centre; portals without a
+  // position are spaced evenly around the room's portalRing.
+  position?: Vec3;
 };
 
 type PortalTarget = {
@@ -42,44 +59,81 @@ type PortalTarget = {
   group: Group;
 };
 
-const PORTALS: PortalDefinition[] = [
-  {
-    name: 'Arrival Space',
-    shortName: 'ARRIVAL SPACE',
-    url: 'https://live.arrival.space/virtualworldsmuseum',
-    color: '#55d6ff',
-  },
-  {
-    name: 'Horizon Worlds',
-    shortName: 'HORIZON WORLDS',
-    url: 'https://horizon.meta.com/world/478207822044529/?locale=en_US',
-    color: '#9b8cff',
-  },
-  {
-    name: 'Hyperfy',
-    shortName: 'HYPERFY',
-    url: 'https://hyperfy.io/virtualworldsmuseum/~luwj',
-    color: '#55ffad',
-  },
-  {
-    name: 'RP1',
-    shortName: 'RP1',
-    url: 'https://enter.rp1.com/?start_cid=104&lat=2.009970127790&lon=2.009992411959&rad=6371000',
-    color: '#ffcb5c',
-  },
-  {
-    name: 'Teleportal',
-    shortName: 'TELEPORTAL',
-    url: 'https://www.virtualworlds.museum/teleportal',
-    color: '#ff70c9',
-  },
-  {
-    name: 'Frame',
-    shortName: 'FRAME',
-    url: 'https://framevr.io/virtualworldsmuseum',
-    color: '#ff755f',
-  },
-];
+// Procedurally built holodeck set: circular floor, grid walls, ceiling, dais.
+type HolodeckSet = {
+  radius: number;
+  wallHeight: number;
+  segments: number;
+  // Multiplies the floor and wall grid colours; also the dais glow colour.
+  tint?: string;
+  floor: { gridCells: number };
+  // `grid` reuses the floor grid texture on the ceiling, darkened by `color`.
+  ceiling: { color: string; grid?: boolean };
+  base?: { color: string };
+  dais: {
+    radiusTop: number;
+    radiusBottom: number;
+    segments: number;
+    color: string;
+    glow?: number;
+    emblemRadius?: number;
+  };
+};
+
+// glTF set: the model is the whole room, walkable floor and walls included.
+type ModelSet = {
+  // Relative to the site base, e.g. rooms/vwm/model.glb.
+  url: string;
+  // Offset that puts the spot visitors arrive at on the origin, floor at y=0.
+  position?: Vec3;
+  rotationY?: number; // degrees
+  scale?: number;
+};
+
+// A room is loaded from public/rooms/<id>.json and rendered by buildRoom().
+// Its set is either a `model` or the holodeck fields.
+type RoomDefinition = {
+  id: string;
+  sign: {
+    // `banner` is the wide letter-spaced title; `panel` is the compact sign.
+    style: 'banner' | 'panel';
+    title: string;
+    subtitle: string;
+    // Supports {swaps} and {sessionEnds} placeholders.
+    caption: string;
+    color: string;
+    position: Vec3;
+  };
+  portalRing?: { radius: number; height: number };
+  portals: PortalDefinition[];
+} & ({ model: ModelSet } | ({ model?: undefined } & HolodeckSet));
+
+const DEFAULT_ROOM = 'hub';
+const ROOM_ID_PATTERN = /^[a-z0-9-]+$/;
+
+function modelUrl(model: ModelSet): string {
+  return `${import.meta.env.BASE_URL}${encodeURI(model.url)}`;
+}
+
+// Fetches the room file and, for model sets, the glTF too, so a room only
+// starts building once everything it needs is in memory.
+async function loadRoom(id: string): Promise<RoomDefinition> {
+  if (!ROOM_ID_PATTERN.test(id)) throw new Error(`Invalid room id "${id}"`);
+  const response = await fetch(`${import.meta.env.BASE_URL}rooms/${id}.json`);
+  if (!response.ok) throw new Error(`Room "${id}" failed to load (${response.status})`);
+  const room = (await response.json()) as RoomDefinition;
+  if (room.id !== id || !Array.isArray(room.portals)) {
+    throw new Error(`rooms/${id}.json is not a valid room definition`);
+  }
+  if (!room.model && typeof room.radius !== 'number') {
+    throw new Error(`rooms/${id}.json needs either a model or holodeck fields`);
+  }
+  if (room.portals.some((portal) => !portal.position) && !room.portalRing) {
+    throw new Error(`rooms/${id}.json has ring portals but no portalRing`);
+  }
+  if (room.model) await AssetManager.loadGLTF(modelUrl(room.model));
+  return room;
+}
 
 const portalTargets: PortalTarget[] = [];
 
@@ -165,7 +219,7 @@ function makeWallGridTexture(): CanvasTexture {
 // Virtual Worlds Museum branding textures
 // ---------------------------------------------------------------------------
 
-function makeTitleSprite(): Sprite {
+function makeBannerSign(sign: RoomDefinition['sign']): Sprite {
   const canvas = document.createElement('canvas');
   canvas.width = 2048;
   canvas.height = 512;
@@ -179,9 +233,9 @@ function makeTitleSprite(): Sprite {
   } catch {
     // letterSpacing is a progressive enhancement; ignore where unsupported.
   }
-  ctx.fillStyle = '#f5c518';
+  ctx.fillStyle = sign.color;
   ctx.font = '700 128px Arial';
-  ctx.fillText('VIRTUAL WORLDS MUSEUM', 1024, 165);
+  ctx.fillText(sign.title, 1024, 165);
 
   try {
     (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = '6px';
@@ -190,11 +244,11 @@ function makeTitleSprite(): Sprite {
   }
   ctx.fillStyle = '#ffffff';
   ctx.font = '700 52px Arial';
-  ctx.fillText('PORTAL LAB 01 — SIX INTEROPERABLE WORLDS', 1024, 285);
+  ctx.fillText(sign.subtitle, 1024, 285);
 
   ctx.fillStyle = 'rgba(255,255,255,0.66)';
   ctx.font = '44px Arial';
-  ctx.fillText('virtualworlds.museum', 1024, 380);
+  ctx.fillText(sign.caption, 1024, 380);
 
   const texture = new CanvasTexture(canvas);
   texture.colorSpace = SRGBColorSpace;
@@ -384,12 +438,12 @@ const OVAL_Y = 1.35;
 const OPEN_RX = 0.86;
 const OPEN_RY = 1.2;
 
-function createPortal(definition: PortalDefinition, index: number): Group {
+// Builds a portal at `position`, facing the room centre. `phase` offsets its
+// pulse so neighbouring portals don't throb in unison.
+function createPortal(definition: PortalDefinition, position: Vector3, phase: number): Group {
   const group = new Group();
-  const radius = 4.6;
-  const angle = (index / PORTALS.length) * Math.PI * 2 - Math.PI / 2;
-  group.position.set(Math.cos(angle) * radius, 1.5, Math.sin(angle) * radius);
-  group.lookAt(0, 1.5, 0);
+  group.position.copy(position);
+  group.lookAt(0, position.y, 0);
 
   const portalColor = new Color(definition.color);
 
@@ -453,7 +507,7 @@ function createPortal(definition: PortalDefinition, index: number): Group {
     shader: plasma.material as ShaderMaterial,
     ring: ringMaterial,
     glow: glowMaterial,
-    phase: (index / PORTALS.length) * Math.PI * 2,
+    phase,
   });
 
   group.updateMatrixWorld(true);
@@ -474,6 +528,108 @@ class PortalEffectsSystem extends createSystem({}, {}) {
   }
 }
 
+// Desktop preview look: ←/→ and horizontal mouse drag yaw the player rig;
+// vertical drag pitches the camera. Kept separate from the built-in
+// TurnSystem so the headset keeps its snap-turn behaviour.
+const DESKTOP_TURN_SPEED = Math.PI / 2; // rad/s
+const MOUSE_LOOK_SENSITIVITY = 0.0025; // rad per pixel dragged
+const MAX_PITCH = (80 / 180) * Math.PI;
+
+// Pointer listeners in main() accumulate drag deltas here; DesktopLookSystem
+// consumes them once per frame.
+const mouseLook = { dragging: false, dx: 0, dy: 0 };
+
+class DesktopLookSystem extends createSystem({}, {}) {
+  update(delta: number) {
+    if (this.world.session) {
+      // Headset owns orientation in XR.
+      mouseLook.dx = 0;
+      mouseLook.dy = 0;
+      return;
+    }
+    const keyboard = this.world.input.keyboard;
+    const dir =
+      (keyboard.getKeyPressed('ArrowLeft') ? 1 : 0) - (keyboard.getKeyPressed('ArrowRight') ? 1 : 0);
+    const yaw = dir * DESKTOP_TURN_SPEED * delta - mouseLook.dx * MOUSE_LOOK_SENSITIVITY;
+    if (yaw !== 0) this.player.rotateY(yaw);
+
+    if (mouseLook.dy !== 0) {
+      const camera = this.camera;
+      camera.rotation.x = Math.max(
+        -MAX_PITCH,
+        Math.min(MAX_PITCH, camera.rotation.x - mouseLook.dy * MOUSE_LOOK_SENSITIVITY),
+      );
+    }
+    mouseLook.dx = 0;
+    mouseLook.dy = 0;
+  }
+}
+
+// Workaround for an IWSDK locomotor bug: jump() doesn't refresh the engine's
+// idle timer, so a jump from standing still is put back to sleep before it is
+// applied and fires on the next movement input instead. A zero slide wakes the
+// engine in the same tick.
+class JumpWakeSystem extends createSystem({}, {}) {
+  private still = new Vector3();
+  private move = { x: 0, y: 0 };
+
+  update() {
+    const actions = this.world.input.actions;
+    if (!actions.getButtonDown(InputActions.LocomotionJump)) return;
+    actions.getAxis2D(InputActions.LocomotionMove, this.move);
+    if (this.move.x !== 0 || this.move.y !== 0) return; // SlideSystem keeps it awake
+    const locomotor = this.world.getSystem(SlideSystem)?.config.locomotor.value as
+      | { slide(movement: Vector3): void }
+      | undefined;
+    locomotor?.slide(this.still);
+  }
+}
+
+// Arrival hold: pins the visitor to their arrival spot while a room loads, so
+// gravity can't drop them before the room's floor exists. The locomotion
+// engine has no gravity switch, but teleporting every frame also zeroes the
+// fall speed. Rooms keep their floor at y = 0.
+//
+// The floor counts as ready once IWSDK has handed it to the locomotion worker
+// (`_initialized`). The worker then builds its collision data synchronously,
+// so the teleports we keep sending during `settle` queue up behind that work
+// and land the visitor on a floor that exists.
+const ARRIVAL_SETTLE = 0.5; // s of extra pinning once the floor is handed over
+const ARRIVAL_TIMEOUT = 20; // s; never pin someone forever if a room breaks
+
+const arrivalHold = {
+  active: false,
+  position: new Vector3(),
+  settle: 0,
+  elapsed: 0,
+  environments: [] as Entity[],
+};
+
+function holdArrival(x: number, z: number) {
+  arrivalHold.active = true;
+  arrivalHold.position.set(x, 0, z);
+  arrivalHold.settle = ARRIVAL_SETTLE;
+  arrivalHold.elapsed = 0;
+  arrivalHold.environments = [];
+}
+
+class ArrivalHoldSystem extends createSystem({}, {}) {
+  update(delta: number) {
+    if (!arrivalHold.active) return;
+    this.world.getSystem(LocomotionSystem)?.setPlayerPosition(arrivalHold.position);
+    arrivalHold.elapsed += delta;
+    const ready =
+      arrivalHold.environments.length > 0 &&
+      arrivalHold.environments.every((entity) =>
+        Boolean(entity.getValue(LocomotionEnvironment, '_initialized')),
+      );
+    if (ready) arrivalHold.settle -= delta;
+    if (arrivalHold.settle <= 0 || arrivalHold.elapsed > ARRIVAL_TIMEOUT) {
+      arrivalHold.active = false;
+    }
+  }
+}
+
 // Shared traversal gate. PortalTraversalSystem locks it while a jump or swap
 // is in flight; WorldSwapSystem releases it when an in-session swap lands.
 // `armed` requires the visitor to step out of a portal before it can trigger
@@ -482,7 +638,7 @@ const traversalGate = { navigating: false, warmup: 1.5, armed: true };
 
 // Experiment B control channel: PortalTraversalSystem posts a swap request
 // here, WorldSwapSystem consumes it.
-const swapControl: { pendingLevel: 'hub' | 'test-room' | null } = { pendingLevel: null };
+const swapControl: { pendingLevel: string | null } = { pendingLevel: null };
 
 class PortalTraversalSystem extends createSystem({}, {}) {
   private headWorld = new Vector3();
@@ -523,7 +679,7 @@ class PortalTraversalSystem extends createSystem({}, {}) {
     // Experiment B: swap portals never navigate. The world is exchanged
     // inside the live XR session by WorldSwapSystem via world.loadLevel().
     if (definition.url.startsWith('swap:')) {
-      const level = definition.url.slice('swap:'.length) as 'hub' | 'test-room';
+      const level = definition.url.slice('swap:'.length);
       if (status) status.textContent = `Swapping to ${definition.name} without leaving VR…`;
       swapControl.pendingLevel = level;
       return;
@@ -545,20 +701,6 @@ class PortalTraversalSystem extends createSystem({}, {}) {
 // ---------------------------------------------------------------------------
 // Experiment B: in-session world swapping (no page navigation)
 // ---------------------------------------------------------------------------
-
-const SWAP_DEF: PortalDefinition = {
-  name: 'Test Room',
-  shortName: 'TEST ROOM · EXP B',
-  url: 'swap:test-room',
-  color: '#eaf6ff',
-};
-
-const RETURN_DEF: PortalDefinition = {
-  name: 'Portal Lab Hub',
-  shortName: 'RETURN TO HUB',
-  url: 'swap:hub',
-  color: '#ffd75e',
-};
 
 let activeWorld: World | null = null;
 
@@ -589,98 +731,151 @@ function pinSession(session: XRSession) {
   });
 }
 
-function buildHubContent(world: World) {
-  const ROOM_RADIUS = 7;
-  const WALL_HEIGHT = 4.9;
+function buildHolodeck(world: World, room: HolodeckSet): Entity {
+  const tint = new Color(room.tint ?? '#ffffff');
 
-  const floorGrid = makeHolodeckGridTexture(1024, 16);
+  const floorGrid = makeHolodeckGridTexture(1024, room.floor.gridCells);
   const floor = new Mesh(
-    new CircleGeometry(ROOM_RADIUS, 72),
+    new CircleGeometry(room.radius, room.segments),
     new MeshStandardMaterial({
       map: floorGrid,
+      color: tint,
       roughness: 0.85,
       metalness: 0.05,
     }),
   );
   floor.rotation.x = -Math.PI / 2;
   floor.position.y = 0.001;
-  world.createTransformEntity(floor).addComponent(LocomotionEnvironment, {
+  const floorEntity = world.createTransformEntity(floor).addComponent(LocomotionEnvironment, {
     type: EnvironmentType.STATIC,
   });
 
-  const base = new Mesh(
-    new CylinderGeometry(ROOM_RADIUS + 0.06, ROOM_RADIUS + 0.06, 0.14, 72),
-    new MeshStandardMaterial({ color: new Color('#0b0b0e'), roughness: 0.9 }),
-  );
-  base.position.y = -0.07;
-  world.createTransformEntity(base);
+  if (room.base) {
+    const base = new Mesh(
+      new CylinderGeometry(room.radius + 0.06, room.radius + 0.06, 0.14, room.segments),
+      new MeshStandardMaterial({ color: new Color(room.base.color), roughness: 0.9 }),
+    );
+    base.position.y = -0.07;
+    world.createTransformEntity(base);
+  }
 
   const walls = new Mesh(
-    new CylinderGeometry(ROOM_RADIUS, ROOM_RADIUS, WALL_HEIGHT, 72, 1, true),
+    new CylinderGeometry(room.radius, room.radius, room.wallHeight, room.segments, 1, true),
     new MeshBasicMaterial({
       map: makeWallGridTexture(),
+      color: tint,
       side: BackSide,
       toneMapped: false,
     }),
   );
-  walls.position.y = WALL_HEIGHT / 2;
+  walls.position.y = room.wallHeight / 2;
   world.createTransformEntity(walls);
 
   const ceiling = new Mesh(
-    new CircleGeometry(ROOM_RADIUS, 72),
+    new CircleGeometry(room.radius, room.segments),
     new MeshBasicMaterial({
-      map: floorGrid,
-      color: new Color('#3d3d3d'),
+      map: room.ceiling.grid ? floorGrid : null,
+      color: new Color(room.ceiling.color),
       toneMapped: false,
     }),
   );
   ceiling.rotation.x = Math.PI / 2;
-  ceiling.position.y = WALL_HEIGHT;
+  ceiling.position.y = room.wallHeight;
   world.createTransformEntity(ceiling);
 
   const dais = new Mesh(
-    new CylinderGeometry(1.25, 1.35, 0.16, 48),
+    new CylinderGeometry(room.dais.radiusTop, room.dais.radiusBottom, 0.16, room.dais.segments),
     new MeshStandardMaterial({
-      color: new Color('#15171d'),
+      color: new Color(room.dais.color),
       metalness: 0.45,
       roughness: 0.4,
+      emissive: room.dais.glow ? tint : new Color('#000000'),
+      emissiveIntensity: room.dais.glow ?? 1,
     }),
   );
   dais.position.y = 0.08;
   world.createTransformEntity(dais);
 
-  const emblem = new Mesh(
-    new CircleGeometry(1.14, 48),
-    new MeshBasicMaterial({
-      map: makeDaisEmblemTexture(),
-      transparent: true,
-      toneMapped: false,
-    }),
-  );
-  emblem.rotation.x = -Math.PI / 2;
-  emblem.position.y = 0.165;
-  world.createTransformEntity(emblem);
-
-  const title = makeTitleSprite();
-  title.position.set(0, 4.3, 0);
-  world.createTransformEntity(title);
-
-  PORTALS.forEach((definition, index) => {
-    const group = createPortal(definition, index);
-    world.createTransformEntity(group);
-    portalTargets.push({ definition, group });
-  });
-
-  // Experiment B swap portal: stands inside the room, facing the spawn.
-  const swapGroup = createPortal(SWAP_DEF, 0);
-  swapGroup.position.set(0, 1.5, -2.6);
-  swapGroup.lookAt(0, 1.5, 0);
-  swapGroup.updateMatrixWorld(true);
-  world.createTransformEntity(swapGroup);
-  portalTargets.push({ definition: SWAP_DEF, group: swapGroup });
+  if (room.dais.emblemRadius) {
+    const emblem = new Mesh(
+      new CircleGeometry(room.dais.emblemRadius, room.dais.segments),
+      new MeshBasicMaterial({
+        map: makeDaisEmblemTexture(),
+        transparent: true,
+        toneMapped: false,
+      }),
+    );
+    emblem.rotation.x = -Math.PI / 2;
+    emblem.position.y = 0.165;
+    world.createTransformEntity(emblem);
+  }
+  return floorEntity;
 }
 
-function makeTestRoomSign(): Sprite {
+function buildModelSet(world: World, model: ModelSet): Entity {
+  // getGLTF returns a fresh clone of the cached scene each visit; geometry and
+  // textures stay shared, and level unloads never dispose them.
+  const gltf = AssetManager.getGLTF(modelUrl(model));
+  if (!gltf) throw new Error(`Model ${model.url} is not loaded`);
+  const set = gltf.scene;
+  if (model.position) set.position.fromArray(model.position);
+  set.rotation.y = ((model.rotationY ?? 0) / 180) * Math.PI;
+  set.scale.setScalar(model.scale ?? 1);
+  world.createTransformEntity(set);
+
+  // The locomotor merges every mesh of an environment into one geometry, and
+  // three's mergeGeometries fails when meshes carry different attribute sets
+  // (e.g. only some have a second UV set). That failure leaves no walkable
+  // floor at all. Hand it an invisible position-only copy instead.
+  const collider = new Group();
+  collider.visible = false;
+  set.updateMatrixWorld(true);
+  set.traverse((child) => {
+    if (!(child instanceof Mesh)) return;
+    const source = child.geometry as BufferGeometry;
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', source.getAttribute('position'));
+    const count = source.getAttribute('position').count;
+    geometry.setIndex(source.index ?? Array.from({ length: count }, (_, i) => i));
+    const mesh = new Mesh(geometry);
+    mesh.matrixAutoUpdate = false;
+    mesh.matrix.copy(child.matrixWorld);
+    collider.add(mesh);
+  });
+  return world.createTransformEntity(collider).addComponent(LocomotionEnvironment, {
+    type: EnvironmentType.STATIC,
+  });
+}
+
+function buildRoom(world: World, room: RoomDefinition) {
+  const walkable = room.model ? buildModelSet(world, room.model) : buildHolodeck(world, room);
+  arrivalHold.environments = [walkable];
+
+  const sign = room.sign.style === 'banner' ? makeBannerSign(room.sign) : makePanelSign(room.sign);
+  sign.position.fromArray(room.sign.position);
+  world.createTransformEntity(sign);
+
+  // Ring portals are spaced evenly starting straight ahead of the spawn;
+  // placed portals use their own position and pulse phase 0.
+  const ringPortals = room.portals.filter((portal) => !portal.position);
+  const position = new Vector3();
+  for (const definition of room.portals) {
+    let phase = 0;
+    if (definition.position) {
+      position.fromArray(definition.position);
+    } else {
+      const ring = room.portalRing!;
+      phase = (ringPortals.indexOf(definition) / ringPortals.length) * Math.PI * 2;
+      const angle = phase - Math.PI / 2;
+      position.set(Math.cos(angle) * ring.radius, ring.height, Math.sin(angle) * ring.radius);
+    }
+    const group = createPortal(definition, position, phase);
+    world.createTransformEntity(group);
+    portalTargets.push({ definition, group });
+  }
+}
+
+function makePanelSign(sign: RoomDefinition['sign']): Sprite {
   const canvas = document.createElement('canvas');
   canvas.width = 1024;
   canvas.height = 512;
@@ -688,15 +883,18 @@ function makeTestRoomSign(): Sprite {
   if (!ctx) throw new Error('2D canvas is unavailable');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#7deeff';
+  ctx.fillStyle = sign.color;
   ctx.font = '700 120px Arial';
-  ctx.fillText('TEST ROOM', 512, 180);
+  ctx.fillText(sign.title, 512, 180);
   ctx.fillStyle = '#ffffff';
   ctx.font = '700 56px Arial';
-  ctx.fillText('Same session. New world.', 512, 290);
+  ctx.fillText(sign.subtitle, 512, 290);
   ctx.fillStyle = 'rgba(255,255,255,0.75)';
   ctx.font = '46px Arial';
-  ctx.fillText(`Swaps: ${expStats.swaps} · Session ends: ${expStats.sessionEnds}`, 512, 390);
+  const caption = sign.caption
+    .replaceAll('{swaps}', String(expStats.swaps))
+    .replaceAll('{sessionEnds}', String(expStats.sessionEnds));
+  ctx.fillText(caption, 512, 390);
 
   const texture = new CanvasTexture(canvas);
   texture.colorSpace = SRGBColorSpace;
@@ -707,74 +905,9 @@ function makeTestRoomSign(): Sprite {
   return sprite;
 }
 
-function buildTestRoomContent(world: World) {
-  const ROOM_RADIUS = 5;
-  const WALL_HEIGHT = 3.4;
-  const tint = new Color('#59d8f2');
-
-  const floor = new Mesh(
-    new CircleGeometry(ROOM_RADIUS, 56),
-    new MeshStandardMaterial({
-      map: makeHolodeckGridTexture(1024, 12),
-      color: tint,
-      roughness: 0.85,
-      metalness: 0.05,
-    }),
-  );
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.y = 0.001;
-  world.createTransformEntity(floor).addComponent(LocomotionEnvironment, {
-    type: EnvironmentType.STATIC,
-  });
-
-  const walls = new Mesh(
-    new CylinderGeometry(ROOM_RADIUS, ROOM_RADIUS, WALL_HEIGHT, 56, 1, true),
-    new MeshBasicMaterial({
-      map: makeWallGridTexture(),
-      color: tint,
-      side: BackSide,
-      toneMapped: false,
-    }),
-  );
-  walls.position.y = WALL_HEIGHT / 2;
-  world.createTransformEntity(walls);
-
-  const ceiling = new Mesh(
-    new CircleGeometry(ROOM_RADIUS, 56),
-    new MeshBasicMaterial({ color: new Color('#0a1418'), toneMapped: false }),
-  );
-  ceiling.rotation.x = Math.PI / 2;
-  ceiling.position.y = WALL_HEIGHT;
-  world.createTransformEntity(ceiling);
-
-  const dais = new Mesh(
-    new CylinderGeometry(0.8, 0.9, 0.16, 40),
-    new MeshStandardMaterial({
-      color: new Color('#0d2a33'),
-      metalness: 0.45,
-      roughness: 0.4,
-      emissive: tint,
-      emissiveIntensity: 0.25,
-    }),
-  );
-  dais.position.y = 0.08;
-  world.createTransformEntity(dais);
-
-  const sign = makeTestRoomSign();
-  sign.position.set(0, 2.2, -3.6);
-  world.createTransformEntity(sign);
-
-  const returnGroup = createPortal(RETURN_DEF, 0);
-  returnGroup.position.set(0, 1.5, 2.9);
-  returnGroup.lookAt(0, 1.5, 0);
-  returnGroup.updateMatrixWorld(true);
-  world.createTransformEntity(returnGroup);
-  portalTargets.push({ definition: RETURN_DEF, group: returnGroup });
-}
-
 class WorldSwapSystem extends createSystem({}, {}) {
   private phase: 'idle' | 'out' | 'swapping' | 'in' = 'idle';
-  private target: 'hub' | 'test-room' = 'hub';
+  private target = DEFAULT_ROOM;
   private camPos = new Vector3();
 
   update(delta: number) {
@@ -798,7 +931,8 @@ class WorldSwapSystem extends createSystem({}, {}) {
         this.phase = 'swapping';
         void this.performSwap();
       }
-    } else if (this.phase === 'in') {
+    } else if (this.phase === 'in' && !arrivalHold.active) {
+      // Stay black until the new room's floor is solid.
       fadeState.opacity = Math.max(0, fadeState.opacity - delta / 0.3);
       if (fadeState.opacity <= 0) this.phase = 'idle';
     }
@@ -818,28 +952,137 @@ class WorldSwapSystem extends createSystem({}, {}) {
       return;
     }
     try {
+      // Fetch first so a missing or broken room file leaves the current room
+      // standing instead of an empty world.
+      const room = await loadRoom(this.target);
       // The main scene document is empty by design (all content is built in
       // code), so loadLevel performs the level unload: every non-persistent
       // entity from the current room is cleared while the XR session, the
       // player rig and this system keep running.
+      holdArrival(world.player.position.x, world.player.position.z);
       await world.loadLevel('scenes/main.iwsdk.scene.json');
       portalTargets.length = 0;
       portalFx.length = 0;
       expStats.swaps += 1;
-      if (this.target === 'test-room') {
-        buildTestRoomContent(world);
-        window.history.pushState(null, '', '?world=test-room');
-      } else {
-        buildHubContent(world);
-        window.history.pushState(null, '', '?world=hub');
-      }
-      reportStats(`swapped to ${this.target}`);
+      buildRoom(world, room);
+      multiplayer.enterRoom(room.id);
+      window.history.pushState(null, '', `?world=${room.id}`);
+      reportStats(`swapped to ${room.id}`);
     } catch (error) {
       console.error('[ExperimentB] swap failed', error);
     }
     traversalGate.navigating = false;
     traversalGate.warmup = 1.0;
     this.phase = 'in';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Multiplayer: voice, video and presence (see multiplayer.ts)
+// ---------------------------------------------------------------------------
+
+let remoteAvatars: RemoteAvatars | null = null;
+let controllerTagSprite: Sprite | null = null;
+
+function describeMultiplayer(status: MultiplayerStatus): string {
+  if (status.note) return status.note;
+  const people = `${status.people} ${status.people === 1 ? 'person' : 'people'}`;
+  const mic = status.joined ? (status.micOn ? 'mic on' : 'mic muted') : 'listening only';
+  return `Room ${status.roomId ?? '…'} · ${people} · ${mic}`;
+}
+
+// Small status tag on the left controller, since the 2D panel is hidden in VR.
+function makeControllerTag(): { sprite: Sprite; redraw: (status: MultiplayerStatus) => void } {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('2D canvas is unavailable');
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  const sprite = new Sprite(
+    new SpriteMaterial({ map: texture, transparent: true, toneMapped: false, depthWrite: false }),
+  );
+  sprite.scale.set(0.16, 0.04, 1);
+  sprite.position.set(0, 0.07, 0.02);
+
+  const redraw = (status: MultiplayerStatus) => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'rgba(6,8,14,0.82)';
+    ctx.beginPath();
+    ctx.roundRect(4, 4, canvas.width - 8, canvas.height - 8, 36);
+    ctx.fill();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '700 40px Arial';
+    ctx.fillStyle = status.micOn ? '#55ffad' : '#ff755f';
+    const mic = status.joined ? (status.micOn ? 'MIC ON' : 'MIC OFF') : 'X: JOIN';
+    ctx.fillText(`${mic} · ${status.cameraOn ? 'CAM ON' : 'CAM OFF'} · ${status.people} here`, 256, 66);
+    texture.needsUpdate = true;
+  };
+  return { sprite, redraw };
+}
+
+class MultiplayerSystem extends createSystem({}, {}) {
+  private sendTimer = 0;
+  private headPosition = new Vector3();
+  private headQuaternion = new Quaternion();
+  private gripPosition = new Vector3();
+  private gripQuaternion = new Quaternion();
+
+  // World pose of one hand or controller, plus joints when hand-tracked.
+  private handState(side: 'left' | 'right'): HandState | undefined {
+    const adapter = this.world.input.xr.visualAdapters[side].value;
+    if (!adapter) return undefined;
+    const grip = this.player.gripSpaces[side];
+    grip.getWorldPosition(this.gripPosition);
+    grip.getWorldQuaternion(this.gripQuaternion);
+    const state: HandState = {
+      p: this.gripPosition.toArray(),
+      q: this.gripQuaternion.toArray() as [number, number, number, number],
+    };
+    // Joint matrices are relative to the grip space; keep only translations.
+    const joints = adapter instanceof XRHandVisualAdapter ? adapter.jointTransforms : undefined;
+    if (joints) {
+      state.j = [];
+      for (let i = 0; i < joints.length; i += 16) {
+        state.j.push(
+          Math.round(joints[i + 12] * 1000),
+          Math.round(joints[i + 13] * 1000),
+          Math.round(joints[i + 14] * 1000),
+        );
+      }
+    }
+    return state;
+  }
+
+  update(delta: number) {
+    this.sendTimer -= delta;
+    if (this.sendTimer <= 0) {
+      this.sendTimer = 0.1; // 10 Hz pose updates
+      this.camera.getWorldPosition(this.headPosition);
+      this.camera.getWorldQuaternion(this.headQuaternion);
+      const hands = this.world.session
+        ? { left: this.handState('left'), right: this.handState('right') }
+        : undefined;
+      multiplayer.sendState(
+        this.headPosition.toArray(),
+        this.headQuaternion.toArray() as [number, number, number, number],
+        hands,
+      );
+    }
+
+    if (controllerTagSprite) controllerTagSprite.visible = !!this.world.session;
+    if (this.world.session) {
+      const left = this.world.input.xr.gamepads.left;
+      if (left?.getButtonDown(InputComponent.X_Button)) void multiplayer.toggleMic();
+      if (left?.getButtonDown(InputComponent.Y_Button)) void multiplayer.toggleCamera();
+    }
+
+    const peers = multiplayer.peers();
+    // IWSDK's AudioSystem suspends the shared AudioContext when VR ends.
+    if (peers.length > 0) remoteAvatars?.resumeAudio();
+    remoteAvatars?.update(peers, delta);
   }
 }
 
@@ -853,6 +1096,43 @@ async function main() {
   world.camera.position.set(0, 1.65, 0.4);
   world.camera.lookAt(0, 1.4, -3);
   world.scene.background = new Color('#050506');
+
+  // Desktop keyboard locomotion. WASD and ↑/↓ drive the slide action; ←/→ are
+  // left free for DesktopLookSystem (the stock browser preset would strafe).
+  world.input.actions.addBindings([
+    {
+      source: 'keyboard',
+      kind: 'axis2d',
+      action: InputActions.LocomotionMove,
+      negativeX: ['KeyA'],
+      positiveX: ['KeyD'],
+      negativeY: ['KeyW', 'ArrowUp'],
+      positiveY: ['KeyS', 'ArrowDown'],
+    },
+    { source: 'keyboard', kind: 'button', action: InputActions.LocomotionJump, code: 'Space' },
+  ]);
+
+  // Desktop mouse look: drag on the scene to shift the view. The HUD is a
+  // sibling of the container, so its button clicks never start a drag.
+  container.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || world.session) return;
+    mouseLook.dragging = true;
+    container.setPointerCapture(event.pointerId);
+    container.classList.add('dragging');
+  });
+  container.addEventListener('pointermove', (event) => {
+    if (!mouseLook.dragging) return;
+    mouseLook.dx += event.movementX;
+    mouseLook.dy += event.movementY;
+  });
+  const endDrag = (event: PointerEvent) => {
+    if (!mouseLook.dragging) return;
+    mouseLook.dragging = false;
+    container.releasePointerCapture(event.pointerId);
+    container.classList.remove('dragging');
+  };
+  container.addEventListener('pointerup', endDrag);
+  container.addEventListener('pointercancel', endDrag);
 
   const ambient = new AmbientLight(0xffffff, 0.85);
   const key = new DirectionalLight(0xffffff, 1.6);
@@ -880,23 +1160,82 @@ async function main() {
   fadeState.mesh.visible = false;
   world.createTransformEntity(fadeState.mesh, { persistent: true });
 
-  // --- First level (hub by default, test room if the URL asks for it) ------
-  const startLevel =
-    new URLSearchParams(window.location.search).get('world') === 'test-room'
-      ? 'test-room'
-      : 'hub';
-  if (startLevel === 'test-room') buildTestRoomContent(world);
-  else buildHubContent(world);
+  // --- First level (hub by default, ?world=<room id> to start elsewhere) ---
+  // Pin the visitor at the origin until the room (a big model can take a
+  // while to download) has a floor to stand on.
+  world.registerSystem(ArrivalHoldSystem, { priority: 2 });
+  holdArrival(0, 0);
+  const loadingStatus = document.getElementById('status');
+  if (loadingStatus) loadingStatus.textContent = 'Loading room…';
+  const startRoom = new URLSearchParams(window.location.search).get('world') ?? DEFAULT_ROOM;
+  let room: RoomDefinition;
+  try {
+    room = await loadRoom(startRoom);
+  } catch (error) {
+    if (startRoom === DEFAULT_ROOM) throw error;
+    console.error(`[Rooms] falling back to ${DEFAULT_ROOM}`, error);
+    room = await loadRoom(DEFAULT_ROOM);
+  }
+  buildRoom(world, room);
+  if (loadingStatus) loadingStatus.textContent = 'Ready.';
 
+  remoteAvatars = new RemoteAvatars(world.scene, world.camera);
+  multiplayer.enterRoom(room.id);
+
+  world.registerSystem(DesktopLookSystem, { priority: 3 });
+  world.registerSystem(JumpWakeSystem, { priority: 3 });
   world.registerSystem(PortalEffectsSystem, { priority: 4 });
   world.registerSystem(PortalTraversalSystem, { priority: 5 });
   world.registerSystem(WorldSwapSystem, { priority: 6 });
+  world.registerSystem(MultiplayerSystem, { priority: 7 });
+
+  // --- Multiplayer controls ------------------------------------------------
+  const joinButton = document.getElementById('mp-join') as HTMLButtonElement | null;
+  const micButton = document.getElementById('mp-mic') as HTMLButtonElement | null;
+  const cameraButton = document.getElementById('mp-camera') as HTMLButtonElement | null;
+  const mpStatus = document.getElementById('mp-status');
+  const controllerTag = makeControllerTag();
+  world.player.gripSpaces.left.add(controllerTag.sprite);
+  controllerTagSprite = controllerTag.sprite;
+
+  const renderMultiplayer = () => {
+    const state = multiplayer.status();
+    if (joinButton) joinButton.hidden = state.joined;
+    if (micButton) {
+      micButton.hidden = !state.joined;
+      micButton.textContent = state.micOn ? 'MUTE MIC' : 'UNMUTE MIC';
+    }
+    if (cameraButton) cameraButton.textContent = state.cameraOn ? 'CAMERA OFF' : 'CAMERA ON';
+    if (mpStatus) {
+      const hint =
+        state.people > 1 && remoteAvatars?.audioSuspended ? ' · Click anywhere to hear others' : '';
+      mpStatus.textContent = describeMultiplayer(state) + hint;
+    }
+    controllerTag.redraw(state);
+  };
+  multiplayer.onChange(renderMultiplayer);
+  renderMultiplayer();
+
+  joinButton?.addEventListener('click', () => void multiplayer.join());
+  micButton?.addEventListener('click', () => void multiplayer.toggleMic());
+  cameraButton?.addEventListener('click', () => void multiplayer.toggleCamera());
+  // Browsers keep audio suspended until a user gesture.
+  const unlockAudio = () => {
+    remoteAvatars?.resumeAudio();
+    renderMultiplayer();
+  };
+  window.addEventListener('pointerdown', unlockAudio);
+  window.addEventListener('keydown', unlockAudio);
 
   const enterButton = document.getElementById('enter-xr') as HTMLButtonElement | null;
   const status = document.getElementById('status');
 
   enterButton?.addEventListener('click', async () => {
-    await enterXR();
+    // launchXR must start inside the click's user activation; the mic
+    // request follows right behind it.
+    const launching = enterXR();
+    void multiplayer.join();
+    await launching;
   });
 
   // Seamless portal returns: when a visitor arrives here through a portal
